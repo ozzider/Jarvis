@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gains Simulator</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #1a1a1f;
+    color: #eee;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden;
+    height: 100%;
+  }
+  #gameWrap {
+    position: relative;
+    width: 960px;
+    height: 600px;
+    margin: 20px auto;
+    background: #000;
+    border: 3px solid #444;
+    border-radius: 8px;
+    box-shadow: 0 0 30px rgba(0,0,0,0.6);
+  }
+  canvas {
+    display: block;
+    background: #87ceeb;
+    border-radius: 5px;
+  }
+  #hint {
+    text-align: center;
+    color: #888;
+    font-size: 13px;
+    margin-top: 8px;
+  }
+  @media (max-width: 1000px) {
+    #gameWrap { width: 100vw; height: calc(100vw * 0.625); margin: 0 auto; }
+  }
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <canvas id="game" width="960" height="600"></canvas>
+</div>
+<div id="hint">A/D or ←/→ move · E interact · H help · Enter start/restart</div>
+
+<script>
+(function () {
+'use strict';
+
+/* =========================================================
+   CANVAS / GLOBAL SETUP
+   ========================================================= */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GROUND_Y = 470;
+
+/* =========================================================
+   GAME STATE
+   ========================================================= */
+const STATE = {
+  START: 'start',
+  PLAYING: 'playing',
+  MINIGAME: 'minigame',
+  WIN: 'win'
+};
+
+const game = {
+  state: STATE.START,
+  showHelp: false,
+  day: 1,
+  dayTimer: 0,
+  popups: [] // floating text popups {x,y,text,color,life}
+};
+
+const stats = {
+  legs: 5,
+  chest: 5,
+  back: 5,
+  arms: 5
+};
+
+const player = {
+  x: 100,
+  y: GROUND_Y,
+  vx: 0,
+  speed: 220, // px per second
+  facing: 1,
+  walkCycle: 0,
+  width: 24
+};
+
+const keys = {};
+
+/* =========================================================
+   STATIONS
+   ========================================================= */
+const stations = [
+  { id: 'squat',   name: 'Squat Rack',   muscle: 'legs',  x: 190, color: '#e05c5c', cooldown: 0, cdMax: 6 },
+  { id: 'bench',   name: 'Bench Press',  muscle: 'chest', x: 400, color: '#5c9be0', cooldown: 0, cdMax: 6 },
+  { id: 'deadlift',name: 'Deadlift Platform', muscle: 'back', x: 610, color: '#7ec95c', cooldown: 0, cdMax: 6 },
+  { id: 'curl',    name: 'Curl Bench',   muscle: 'arms',  x: 820, color: '#e0c65c', cooldown: 0, cdMax: 6 }
+];
+
+const STATION_ZONE = 55;
+
+let activeStation = null;
+let minigame = null; // holds current minigame object
+
+/* =========================================================
+   TITLES
+   ========================================================= */
+function gainsScore() {
+  return (stats.legs + stats.chest + stats.back + stats.arms) / 4;
+}
+function titleForScore(score) {
+  if (score >= 90) return 'Absolute Unit';
+  if (score >= 60) return 'Swole';
+  if (score >= 30) return 'Gym Rat';
+  return 'Newbie';
+}
+
+/* =========================================================
+   INPUT
+   ========================================================= */
+window.addEventListener('keydown', (e) => {
+  if (keys[e.code]) { /* already down, avoid re-trigger spam interpretation issues */ }
+  keys[e.code] = true;
+
+  if (game.state === STATE.START && e.code === 'Enter') {
+    startGame();
+    e.preventDefault();
+    return;
+  }
+  if (game.state === STATE.WIN && e.code === 'Enter') {
+    resetGame();
+    startGame();
+    e.preventDefault();
+    return;
+  }
+  if (e.code === 'KeyH') {
+    game.showHelp = !game.showHelp;
+  }
+  if (game.state === STATE.PLAYING && e.code === 'KeyE') {
+    tryStartMinigame();
+  }
+  if (game.state === STATE.MINIGAME && minigame) {
+    minigame.handleKeyDown(e.code);
+  }
+  // prevent page scroll on arrows/space
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
+    e.preventDefault();
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  keys[e.code] = false;
+  if (game.state === STATE.MINIGAME && minigame && minigame.handleKeyUp) {
+    minigame.handleKeyUp(e.code);
+  }
+});
+
+/* =========================================================
+   GAME FLOW
+   ========================================================= */
+function startGame() {
+  game.state = STATE.PLAYING;
+}
+
+function resetGame() {
+  stats.legs = 5; stats.chest = 5; stats.back = 5; stats.arms = 5;
+  player.x = 100;
+  game.day = 1;
+  game.dayTimer = 0;
+  stations.forEach(s => s.cooldown = 0);
+  game.popups = [];
+}
+
+function addPopup(x, y, text, color) {
+  game.popups.push({ x, y, text, color, life: 1.6 });
+}
+
+function tryStartMinigame() {
+  for (const st of stations) {
+    if (Math.abs(player.x - st.x) < STATION_ZONE) {
+      if (st.cooldown > 0) {
+        addPopup(st.x, GROUND_Y - 160, 'Resting... ' + Math.ceil(st.cooldown) + 's', '#ff8888');
+        return;
+      }
+      activeStation = st;
+      game.state = STATE.MINIGAME;
+      minigame = createMinigame(st);
+      return;
+    }
+  }
+}
+
+function finishMinigame(gain, quality) {
+  const st = activeStation;
+  if (st) {
+    stats[st.muscle] = Math.min(100, stats[st.muscle] + gain);
+    st.cooldown = st.cdMax;
+    addPopup(st.x, GROUND_Y - 180, '+' + gain.toFixed(0) + ' ' + st.muscle + '!', qualityColor(quality));
+  }
+  activeStation = null;
+  minigame = null;
+  game.state = STATE.PLAYING;
+
+  if (gainsScore() >= 100 || (stats.legs >= 100 && stats.chest >= 100 && stats.back >= 100 && stats.arms >= 100)) {
+    game.state = STATE.WIN;
+  }
+}
+
+function qualityColor(q) {
+  if (q === 'great') return '#7CFC00';
+  if (q === 'good') return '#FFD700';
+  return '#ffaaaa';
+}
+
+/* =========================================================
+   MINIGAME FACTORY
+   ========================================================= */
+function createMinigame(station) {
+  switch (station.muscle) {
+    case 'legs': return new SquatGame();
+    case 'chest': return new BenchGame();
+    case 'back': return new DeadliftGame();
+    case 'arms': return new CurlGame();
+  }
+}
+
+/* ---------- SQUAT (legs): alternate W/S (Up/Down) ---------- */
+class SquatGame {
+  constructor() {
+    this.reps = 0;
+    this.target = 8;
+    this.phase = 'top'; // 'top' or 'bottom' -- next expected input
+    this.barPos = 0; // 0 = top, 1 = bottom
+    this.timeLeft = 12;
+    this.flashTimer = 0;
+    this.failFlash = 0;
+  }
+  handleKeyDown(code) {
+    const down = (code === 'KeyS' || code === 'ArrowDown');
+    const up = (code === 'KeyW' || code === 'ArrowUp');
+    if (this.phase === 'top' && down) {
+      this.phase = 'bottom';
+      this.barPos = 1;
+      this.flashTimer = 0.15;
+    } else if (this.phase === 'bottom' && up) {
+      this.phase = 'top';
+      this.barPos = 0;
+      this.reps++;
+      this.flashTimer = 0.15;
+      if (this.reps >= this.target) {
+        finishMinigame(5, 'great');
+      }
+    } else if (down || up) {
+      this.failFlash = 0.2;
+    }
+  }
+  update(dt) {
+    this.timeLeft -= dt;
+    if (this.flashTimer > 0) this.flashTimer -= dt;
+    if (this.failFlash > 0) this.failFlash -= dt;
+    if (this.timeLeft <= 0) {
+      const gain = 1 + this.reps * 0.4;
+      finishMinigame(Math.max(1, Math.round(gain)), this.reps >= this.target * 0.6 ? 'good' : 'meh');
+    }
+  }
+  draw() {
+    drawMinigameFrame('SQUAT — Legs', this.reps, this.target, this.timeLeft);
+    const cx = W / 2, top = 260, bottom = 420;
+    ctx.strokeStyle = '#666';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx, top);
+    ctx.lineTo(cx, bottom);
+    ctx.stroke();
+    // zones
+    ctx.fillStyle = 'rgba(124,252,0,0.25)';
+    ctx.fillRect(cx - 40, top - 15, 80, 30);
+    ctx.fillRect(cx - 40, bottom - 15, 80, 30);
+    ctx.fillStyle = '#fff';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('TOP (W/↑)', cx, top - 25);
+    ctx.fillText('BOTTOM (S/↓)', cx, bottom + 35);
+    // bar knob
+    const y = top + (bottom - top) * this.barPos;
+    ctx.fillStyle = this.flashTimer > 0 ? '#7CFC00' : (this.failFlash > 0 ? '#ff4444' : '#ffcc00');
+    ctx.beginPath();
+    ctx.arc(cx, y, 18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(this.phase === 'top' ? 'GO DOWN' : 'STAND UP', cx, y + 4);
+  }
+}
+
+/* ---------- BENCH PRESS (chest): mash space, timing in good zone ---------- */
+class BenchGame {
+  constructor() {
+    this.reps = 0;
+    this.target = 10;
+    this.timeLeft = 10;
+    this.indicatorPos = 0;
+    this.dir = 1;
+    this.speed = 1.6;
+    this.goodZoneCenter = 0.5;
+    this.goodZoneWidth = 0.18;
+    this.lastQuality = null;
+    this.flashTimer = 0;
+    this.gains = 0;
+  }
+  handleKeyDown(code) {
+    if (code !== 'Space') return;
+    const dist = Math.abs(this.indicatorPos - this.goodZoneCenter);
+    let quality, points;
+    if (dist < this.goodZoneWidth / 2) {
+      quality = 'great'; points = 1.0;
+    } else if (dist < this.goodZoneWidth) {
+      quality = 'good'; points = 0.6;
+    } else {
+      quality = 'meh'; points = 0.25;
+    }
+    this.reps++;
+    this.gains += points;
+    this.lastQuality = quality;
+    this.flashTimer = 0.15;
+    // re-randomize good zone a bit each press for variety
+    this.goodZoneCenter = 0.3 + Math.random() * 0.4;
+    if (this.reps >= this.target) {
+      const gain = Math.max(2, Math.round(2 + this.gains * 0.5));
+      finishMinigame(gain, this.gains / this.target > 0.7 ? 'great' : 'good');
+    }
+  }
+  update(dt) {
+    this.timeLeft -= dt;
+    this.indicatorPos += this.dir * this.speed * dt;
+    if (this.indicatorPos > 1) { this.indicatorPos = 1; this.dir = -1; }
+    if (this.indicatorPos < 0) { this.indicatorPos = 0; this.dir = 1; }
+    if (this.flashTimer > 0) this.flashTimer -= dt;
+    if (this.timeLeft <= 0) {
+      const gain = Math.max(1, Math.round(1 + this.gains * 0.5));
+      finishMinigame(gain, this.gains / this.target > 0.5 ? 'good' : 'meh');
+    }
+  }
+  draw() {
+    drawMinigameFrame('BENCH PRESS — Chest', this.reps, this.target, this.timeLeft);
+    const barX = W / 2 - 200, barY = 320, barW = 400, barH = 30;
+    ctx.strokeStyle = '#999';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(barX, barY, barW, barH);
+    // good zone
+    const gzX = barX + (this.goodZoneCenter - this.goodZoneWidth) * barW;
+    const gzW = this.goodZoneWidth * 2 * barW;
+    ctx.fillStyle = 'rgba(124,252,0,0.35)';
+    ctx.fillRect(gzX, barY, gzW, barH);
+    // indicator
+    const ix = barX + this.indicatorPos * barW;
+    ctx.fillStyle = this.flashTimer > 0 ? '#fff' : '#ffcc00';
+    ctx.fillRect(ix - 4, barY - 8, 8, barH + 16);
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('MASH SPACE — hit the green zone!', W / 2, barY - 25);
+    if (this.lastQuality) {
+      ctx.fillStyle = qualityColor(this.lastQuality);
+      ctx.font = 'bold 20px sans-serif';
+      ctx.fillText(this.lastQuality.toUpperCase() + '!', W / 2, barY + barH + 40);
+    }
+  }
+}
+
+/* ---------- DEADLIFT (back): hold space to charge, release at target ---------- */
+class DeadliftGame {
+  constructor() {
+    this.reps = 0;
+    this.target = 5;
+    this.timeLeft = 15;
+    this.charging = false;
+    this.charge = 0; // 0..1
+    this.chargeSpeed = 0.9;
+    this.targetCenter = 0.55 + Math.random() * 0.2;
+    this.targetWidth = 0.12;
+    this.lastQuality = null;
+    this.msgTimer = 0;
+    this.gains = 0;
+    this.failedFlash = 0;
+  }
+  handleKeyDown(code) {
+    if (code === 'Space' && !this.charging && this.msgTimer <= 0) {
+      this.charging = true;
+      this.charge = 0;
+    }
+  }
+  handleKeyUp(code) {
+    if (code === 'Space' && this.charging) {
+      this.charging = false;
+      const dist = Math.abs(this.charge - this.targetCenter);
+      let quality, points;
+      if (dist < this.targetWidth / 2) { quality = 'great'; points = 1.0; }
+      else if (dist < this.targetWidth) { quality = 'good'; points = 0.6; }
+      else { quality = 'meh'; points = 0.2; }
+      this.reps++;
+      this.gains += points;
+      this.lastQuality = quality;
+      this.msgTimer = 0.6;
+      this.targetCenter = 0.4 + Math.random() * 0.35;
+      if (this.reps >= this.target) {
+        const gain = Math.max(2, Math.round(2 + this.gains * 0.8));
+        finishMinigame(gain, this.gains / this.target > 0.7 ? 'great' : 'good');
+      }
+    }
+  }
+  update(dt) {
+    this.timeLeft -= dt;
+    if (this.msgTimer > 0) this.msgTimer -= dt;
+    if (this.charging) {
+      this.charge += this.chargeSpeed * dt;
+      if (this.charge >= 1) {
+        // overcharged - failed rep, auto release
+        this.charge = 1;
+        this.charging = false;
+        this.reps++;
+        this.lastQuality = 'meh';
+        this.gains += 0.1;
+        this.msgTimer = 0.6;
+        this.failedFlash = 0.3;
+        this.targetCenter = 0.4 + Math.random() * 0.35;
+      }
+    }
+    if (this.timeLeft <= 0) {
+      const gain = Math.max(1, Math.round(1 + this.gains * 0.8));
+      finishMinigame(gain, this.gains / this.target > 0.5 ? 'good' : 'meh');
+    }
+  }
+  draw() {
+    drawMinigameFrame('DEADLIFT — Back', this.reps, this.target, this.timeLeft);
+    const barX = W / 2 - 40, barY = 480, barH = 200, barW = 80;
+    ctx.strokeStyle = '#999';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(barX, barY - barH, barW, barH);
+    // target zone (measured from bottom)
+    const tzY = barY - (this.targetCenter + this.targetWidth) * barH;
+    const tzH = this.targetWidth * 2 * barH;
+    ctx.fillStyle = 'rgba(124,252,0,0.35)';
+    ctx.fillRect(barX, tzY, barW, tzH);
+    // charge fill
+    const fillH = this.charge * barH;
+    ctx.fillStyle = this.failedFlash > 0 ? '#ff4444' : '#ffcc00';
+    ctx.fillRect(barX, barY - fillH, barW, fillH);
+    if (this.failedFlash > 0) this.failedFlash -= 0.016;
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('HOLD SPACE to charge, RELEASE in the green zone!', W / 2, barY - barH - 30);
+    if (this.lastQuality && this.msgTimer > 0) {
+      ctx.fillStyle = qualityColor(this.lastQuality);
+      ctx.font = 'bold 20px sans-serif';
+      ctx.fillText(this.lastQuality.toUpperCase() + '!', W / 2, barY - barH - 55);
+    }
+  }
+}
+
+/* ---------- BICEP CURL (arms): alternate left/right ---------- */
+class CurlGame {
+  constructor() {
+    this.reps = 0;
+    this.target = 12;
+    this.timeLeft = 9;
+    this.nextArm = 'left'; // expect left then right
+    this.flashTimer = 0;
+    this.failFlash = 0;
+  }
+  handleKeyDown(code) {
+    const left = code === 'ArrowLeft' || code === 'KeyA';
+    const right = code === 'ArrowRight' || code === 'KeyD';
+    if (this.nextArm === 'left' && left) {
+      this.nextArm = 'right';
+      this.flashTimer = 0.12;
+    } else if (this.nextArm === 'right' && right) {
+      this.nextArm = 'left';
+      this.reps++;
+      this.flashTimer = 0.12;
+      if (this.reps >= this.target) {
+        finishMinigame(4, 'great');
+      }
+    } else if (left || right) {
+      this.failFlash = 0.15;
+    }
+  }
+  update(dt) {
+    this.timeLeft -= dt;
+    if (this.flashTimer > 0) this.flashTimer -= dt;
+    if (this.failFlash > 0) this.failFlash -= dt;
+    if (this.timeLeft <= 0) {
+      const gain = 1 + this.reps * 0.3;
+      finishMinigame(Math.max(1, Math.round(gain)), this.reps >= this.target * 0.6 ? 'good' : 'meh');
+    }
+  }
+  draw() {
+    drawMinigameFrame('BICEP CURL — Arms', this.reps, this.target, this.timeLeft);
+    const cy = 340;
+    ctx.font = '16px sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.fillText('Alternate ← and → rapidly!', W / 2, cy - 60);
+
+    // left indicator
+    const leftActive = this.nextArm === 'left';
+    ctx.fillStyle = leftActive ? (this.flashTimer > 0 ? '#7CFC00' : '#ffcc00') : '#444';
+    ctx.beginPath();
+    ctx.arc(W / 2 - 100, cy, 35, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText('←', W / 2 - 100, cy + 7);
+
+    // right indicator
+    const rightActive = this.nextArm === 'right';
+    ctx.fillStyle = rightActive ? (this.flashTimer > 0 ? '#7CFC00' : '#ffcc00') : '#444';
+    ctx.beginPath();
+    ctx.arc(W / 2 + 100, cy, 35, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.fillText('→', W / 2 + 100, cy + 7);
+
+    if (this.failFlash > 0) {
+      ctx.fillStyle = '#ff4444';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('Wrong arm!', W / 2, cy + 80);
+    }
+  }
+}
+
+function drawMinigameFrame(title, reps, target, timeLeft) {
+  ctx.fillStyle = '#111';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 26px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, W / 2, 70);
+  ctx.font = '18px sans-serif';
+  ctx.fillText('Reps: ' + reps + ' / ' + target, W / 2, 105);
+  ctx.fillStyle = timeLeft < 3 ? '#ff5555' : '#aaa';
+  ctx.fillText('Time: ' + Math.max(0, timeLeft).toFixed(1) + 's', W / 2, 130);
+}
+
+/* =========================================================
+   UPDATE LOOP
+   ========================================================= */
+let lastTime = performance.now();
+
+function update(dt) {
+  // popups always update
+  for (let i = game.popups.length - 1; i >= 0; i--) {
+    const p = game.popups[i];
+    p.life -= dt;
+    p.y -= dt * 20;
+    if (p.life <= 0) game.popups.splice(i, 1);
+  }
+
+  if (game.state === STATE.PLAYING) {
+    // movement
+    let dx = 0;
+    if (keys['KeyA'] || keys['ArrowLeft']) dx -= 1;
+    if (keys['KeyD'] || keys['ArrowRight']) dx += 1;
+    player.vx = dx * player.speed;
+    player.x += player.vx * dt;
+    player.x = Math.max(30, Math.min(W - 30, player.x));
+    if (dx !== 0) {
+      player.facing = dx > 0 ? 1 : -1;
+      player.walkCycle += dt * 10;
+    }
+
+    // cooldowns & day/decay
+    stations.forEach(s => { if (s.cooldown > 0) s.cooldown = Math.max(0, s.cooldown - dt); });
+    game.dayTimer += dt;
+    if (game.dayTimer > 30) {
+      game.dayTimer = 0;
+      game.day++;
+      // subtle decay
+      ['legs','chest','back','arms'].forEach(k => {
+        stats[k] = Math.max(0, stats[k] - 0.5);
+      });
+    }
+  } else if (game.state === STATE.MINIGAME && minigame) {
+    minigame.update(dt);
+  }
+}
+
+/* =========================================================
+   RENDER
+   ========================================================= */
+function drawBackground() {
+  // sky/wall
+  const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  grad.addColorStop(0, '#3a3a45');
+  grad.addColorStop(1, '#55555f');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, GROUND_Y);
+
+  // floor
+  ctx.fillStyle = '#888888';
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.strokeStyle = '#777';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < W; i += 40) {
+    ctx.beginPath();
+    ctx.moveTo(i, GROUND_Y);
+    ctx.lineTo(i, H);
+    ctx.stroke();
+  }
+
+  // gym sign
+  ctx.fillStyle = '#222';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('GAINS GYM', W / 2, 40);
+}
+
+function drawStation(st) {
+  const baseY = GROUND_Y;
+  const inZone = Math.abs(player.x - st.x) < STATION_ZONE;
+
+  // zone highlight
+  if (game.state === STATE.PLAYING) {
+    ctx.fillStyle = inZone && st.cooldown <= 0 ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
+    ctx.fillRect(st.x - STATION_ZONE, baseY - 140, STATION_ZONE * 2, 140);
+  }
+
+  ctx.fillStyle = st.color;
+
+  if (st.id === 'squat') {
+    // squat rack: two vertical posts + bar
+    ctx.fillRect(st.x - 35, baseY - 110, 10, 110);
+    ctx.fillRect(st.x + 25, baseY - 110, 10, 110);
+    ctx.fillRect(st.x - 40, baseY - 80, 80, 8);
+  } else if (st.id === 'bench') {
+    // bench: flat seat + supports
+    ctx.fillRect(st.x - 40, baseY - 25, 80, 12);
+    ctx.fillRect(st.x - 30, baseY - 13, 8, 13);
+    ctx.fillRect(st.x + 22, baseY - 13, 8, 13);
+    ctx.fillRect(st.x - 45, baseY - 55, 90, 8);
+    ctx.fillRect(st.x - 45, baseY - 55, 8, 30);
+    ctx.fillRect(st.x + 37, baseY - 55, 8, 30);
+  } else if (st.id === 'deadlift') {
+    // platform + barbell
+    ctx.fillRect(st.x - 45, baseY - 10, 90, 10);
+    ctx.fillStyle = '#333';
+    ctx.fillRect(st.x - 40, baseY - 18, 80, 8);
+    ctx.fillStyle = st.color;
+    ctx.beginPath();
+    ctx.arc(st.x - 38, baseY - 14, 12, 0, Math.PI * 2);
+    ctx.arc(st.x + 38, baseY - 14, 12, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (st.id === 'curl') {
+    // dumbbell rack
+    ctx.fillRect(st.x - 40, baseY - 60, 80, 60);
+    ctx.fillStyle = '#333';
+    for (let i = 0; i < 3; i++) {
+      ctx.fillRect(st.x - 30 + i * 22, baseY - 50, 14, 8);
+    }
+  }
+
+  // label
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 13px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(st.name, st.x, baseY - 150);
+
+  // cooldown indicator
+  if (st.cooldown > 0) {
+    ctx.fillStyle = '#ff8888';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('resting ' + Math.ceil(st.cooldown) + 's', st.x, baseY - 132);
+  } else if (inZone && game.state === STATE.PLAYING) {
+    ctx.fillStyle = '#7CFC00';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText('Press E to train', st.x, baseY - 132);
+  }
+}
+
+/* draw stick-figure character, sizes scaled by stats */
+function drawPlayer() {
+  const x = player.x;
+  const groundY = GROUND_Y;
+
+  const legW = 4 + (stats.legs / 100) * 12;   // 4..16
+  const legLen = 55;
+  const torsoW = 10 + ((stats.chest + stats.back) / 200) * 30; // 10..40
+  const torsoLen = 70;
+  const armW = 4 + (stats.arms / 100) * 12; // 4..16
+  const armLen = 50;
+  const headR = 14;
+
+  const bob = Math.sin(player.walkCycle) * 3;
+  const legSwing = Math.sin(player.walkCycle) * 14;
+
+  const hipY = groundY - legLen;
+  const shoulderY = hipY - torsoLen + bob;
+  const headY = shoulderY - headR - 4 + bob;
+
+  ctx.save();
+  ctx.translate(x, 0);
+  ctx.scale(player.facing, 1);
+
+  ctx.strokeStyle = '#2b2bbf';
+  ctx.fillStyle = '#2b2bbf';
+  ctx.lineCap = 'round';
+
+  // back leg
+  ctx.lineWidth = legW;
+  ctx.beginPath();
+  ctx.moveTo(0, hipY);
+  ctx.lineTo(-legSwing * 0.6, groundY);
+  ctx.stroke();
+
+  // front leg
+  ctx.beginPath();
+  ctx.moveTo(0, hipY);
+  ctx.lineTo(legSwing * 0.6, groundY);
+  ctx.stroke();
+
+  // torso
+  ctx.lineWidth = torsoW;
+  ctx.beginPath();
+  ctx.moveTo(0, hipY);
+  ctx.lineTo(0, shoulderY);
+  ctx.stroke();
+
+  // back arm
+  ctx.lineWidth = armW;
+  ctx.beginPath();
+  ctx.moveTo(0, shoulderY + 4);
+  ctx.lineTo(-legSwing * 0.5, shoulderY + armLen);
+  ctx.stroke();
+
+  // front arm
+  ctx.beginPath();
+  ctx.moveTo(0, shoulderY + 4);
+  ctx.lineTo(legSwing * 0.5, shoulderY + armLen);
+  ctx.stroke();
+
+  // head
+  ctx.beginPath();
+  ctx.fillStyle = '#f2c299';
+  ctx.arc(0, headY, headR, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  const barW = 200, barH = 18, gap = 12, startX = 20, startY = 20;
+  const labels = [
+    { key: 'legs', label: 'Legs', color: '#e05c5c' },
+    { key: 'chest', label: 'Chest', color: '#5c9be0' },
+    { key: 'back', label: 'Back', color: '#7ec95c' },
+    { key: 'arms', label: 'Arms', color: '#e0c65c' }
+  ];
+  labels.forEach((l, i) => {
+    const x = startX;
+    const y = startY + i * (barH + gap);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(x, y, barW, barH);
+    ctx.fillStyle = l.color;
+    ctx.fillRect(x, y, barW * (stats[l.key] / 100), barH);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, barW, barH);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(l.label + ': ' + Math.round(stats[l.key]), x + 6, y + 13);
+  });
+
+  // title & score
+  const score = gainsScore();
+  const title = titleForScore(score);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText(title, W - 20, 32);
+  ctx.font = '13px sans-serif';
+  ctx.fillStyle = '#ccc';
+  ctx.fillText('Gains Score: ' + score.toFixed(0) + ' / 100', W - 20, 52);
+  ctx.fillText('Day ' + game.day, W - 20, 70);
+
+  // controls reminder
+  ctx.textAlign = 'center';
+  ctx.font = '12px sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText('A/D or ←/→ move   ·   E train   ·   H help', W / 2, H - 12);
+}
+
+function drawPopups() {
+  game.popups.forEach(p => {
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life));
+    ctx.fillStyle = p.color;
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.text, p.x, p.y);
+    ctx.globalAlpha = 1;
+  });
+}
+
+function drawHelpOverlay() {
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(W / 2 - 260, H / 2 - 190, 520, 380);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(W / 2 - 260, H / 2 - 190, 520, 380);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillText('CONTROLS', W / 2, H / 2 - 150);
+  ctx.font = '16px sans-serif';
+  ctx.textAlign = 'left';
+  const lines = [
+    'A/D or ←/→  :  Move left / right',
+    'E           :  Interact / start exercise',
+    'W/S or ↑/↓  :  Squat mini-game (alternate up/down)',
+    'Space (mash):  Bench press mini-game',
+    'Space (hold+release): Deadlift mini-game',
+    '←/→ alternate: Bicep curl mini-game',
+    'H           :  Toggle this help overlay',
+    'Enter       :  Start game / restart on max gains'
+  ];
+  lines.forEach((line, i) => {
+    ctx.fillText(line, W / 2 - 230, H / 2 - 110 + i * 30);
+  });
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#aaa';
+  ctx.font = '13px sans-serif';
+  ctx.fillText('Press H to close', W / 2, H / 2 + 170);
+}
+
+function drawStartScreen() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#232332');
+  grad.addColorStop(1, '#3a3a4d');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 56px sans-serif';
+  ctx.fillText('GAINS SIMULATOR', W / 2, H / 2 - 60);
+
+  ctx.font = '20px sans-serif';
+  ctx.fillStyle = '#ccc';
+  ctx.fillText('From skinny beginner to Absolute Unit.', W / 2, H / 2 - 10);
+
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillStyle = '#7CFC00';
+  const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+  ctx.globalAlpha = pulse;
+  ctx.fillText('Press ENTER to Start', W / 2, H / 2 + 60);
+  ctx.globalAlpha = 1;
+
+  ctx.font = '14px sans-serif';
+  ctx.fillStyle = '#999';
+  ctx.fillText('Press H anytime for controls help', W / 2, H / 2 + 110);
+}
+
+function drawWinScreen() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#2a1f00');
+  grad.addColorStop(1, '#4d3a00');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#FFD700';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 48px sans-serif';
+  ctx.fillText('ABSOLUTE UNIT ACHIEVED', W / 2, H / 2 - 60);
+
+  ctx.font = '20px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Legs ' + Math.round(stats.legs) + '  Chest ' + Math.round(stats.chest) +
+    '  Back ' + Math.round(stats.back) + '  Arms ' + Math.round(stats.arms), W / 2, H / 2);
+
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillStyle = '#7CFC00';
+  const pulse = 0.6 + 0.4 * Math.sin(performance.now() / 300);
+  ctx.globalAlpha = pulse;
+  ctx.fillText('Press ENTER to train again', W / 2, H / 2 + 60);
+  ctx.globalAlpha = 1;
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+
+  if (game.state === STATE.START) {
+    drawStartScreen();
+  } else if (game.state === STATE.WIN) {
+    drawWinScreen();
+  } else if (game.state === STATE.MINIGAME && minigame) {
+    minigame.draw();
+    drawPopups();
+  } else {
+    drawBackground();
+    stations.forEach(drawStation);
+    drawPlayer();
+    drawHUD();
+    drawPopups();
+  }
+
+  if (game.showHelp) drawHelpOverlay();
+}
+
+/* =========================================================
+   MAIN LOOP
+   ========================================================= */
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
