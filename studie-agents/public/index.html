@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Studie Agents</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>Studie Agents</h1>
+  <p>Stap 1: simpele testpagina. Kies een agent en stel een vraag.</p>
+
+  <!-- Hier komen de knoppen voor de agents (gevuld door app.js) -->
+  <div id="agent-knoppen"></div>
+
+  <section id="chat" hidden>
+    <h2 id="chat-titel"></h2>
+    <div id="berichten"></div>
+    <form id="chat-formulier">
+      <textarea id="invoer" rows="3" placeholder="Typ je bericht..." required></textarea>
+      <button type="submit">Verstuur</button>
+    </form>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
